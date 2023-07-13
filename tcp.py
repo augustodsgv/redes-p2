@@ -40,9 +40,7 @@ class Servidor:
             ### Usa-se o operador | para agrupar flags, mas poderia-se usar o operador + entre elas
             if self.callback:                   # Coloca a conexão como aceita que a conexão foi aceita
                 self.callback(conexao)
-
-            header = make_header(dst_port, src_port, conexao.seq_no, conexao.ack_no, FLAGS_SYN | FLAGS_ACK) 
-            conexao.enviar(fix_checksum(header, dst_addr, src_addr))        ## Não sei pq usei isso
+            conexao.hand_shake()
             
         elif id_conexao in self.conexoes:                   # Caso não seja uma conexão nova, verifica se já é uma conexão estabelecida
             # Passa para a conexão adequada se ela já estiver estabelecida
@@ -62,28 +60,36 @@ class Conexao:
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
         self.seq_no = random.randint(0, 0xffff)            ### Adicionando o valor de seq_no, para indicar o valor atual do número de sequencia
         self.ack_no = ack_no
+
     def _exemplo_timer(self):
         # Esta função é só um exemplo e pode ser removida
         print('Este é um exemplo de como fazer um timer')
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        print(f'cliente  : seq_no {seq_no} ack_no {ack_no}')
-        print(f'servidor : seq_no {self.seq_no} ack_no {self.ack_no}')
         ## Verificando se o pacote está na sequencia correta
-        if seq_no == self.ack_no:       # Caso esteja recebendo o pacote certo, ou seja, o seq_no é o mesmo do último ack_no
-            # Aumentando o valor do ACK para indicar o próximo valor que quer receber
-            self.ack_no += len(payload)
-            print(f'ack + payload : {self.ack_no}')
-            print('recebido payload: %r' % payload)
+        ## O len do payload tem que ser maior que 0 para não responder ACKs
+        if seq_no == self.ack_no and len(payload) > 0:       # Caso esteja recebendo o pacote certo, ou seja, o seq_no é o mesmo do último ack_no
+            self.ack_no += len(payload) ## Aumentando o valor do ACK para indicar o próximo valor que quer receber
+            
             self.callback(self, payload)  ## Enviando os dados para a camada de aplicação
-            #id_conexao = (src_addr, src_port, dst_addr, dst_port)
-            header = make_header(self.id_conexao[3], self.id_conexao[1], self.seq_no, self.ack_no, FLAGS_ACK)
-            self.enviar(fix_checksum(header, self.id_conexao[2], self.id_conexao[0]))
+
+            self.send_ack()
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-        
     # Os métodos abaixo fazem parte da API
+
+    def hand_shake(self):
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_SYN | FLAGS_ACK) 
+        self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)        ## Não sei pq usei isso
+        self.seq_no += 1
+
+    # Função que envia a confirmação dos dados
+    def send_ack(self):
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) 
+        self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)        ## Não sei pq usei isso
 
     def registrar_recebedor(self, callback):
         """
@@ -92,19 +98,23 @@ class Conexao:
         """
         self.callback = callback
 
-    def enviar(self, dados):
+    def enviar(self, dados = ''):
         """
         Usado pela camada de aplicação para enviar dados
         """
         # TODO: implemente aqui o envio de dados.
         # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
+        
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando dados da conexão
+        
+        while len(dados) > 0:
+            segmento = dados[:MSS]      # -1 para contar o tamanho do header
+            dados = dados[MSS:]
 
-        # Criando o arquivo
-        self.servidor.rede.enviar(dados, self.id_conexao[0])            ## Colocando aqui o endereço do cliente da conexão
-        # que você construir para a camada de rede.
-        #print(self.callback)        
-        #self.callback(self, dados)
-        self.seq_no+=len(dados)
+            header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
+            self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), self.id_conexao[0])            ## Colocando aqui o endereço do cliente da conexão
+            self.seq_no += len (segmento)
+
         
 
     def fechar(self):
