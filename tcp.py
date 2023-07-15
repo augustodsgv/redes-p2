@@ -41,14 +41,17 @@ class Servidor:
             if self.callback:                   # Coloca a conexão como aceita que a conexão foi aceita
                 self.callback(conexao)
             conexao.hand_shake()
-            
         elif id_conexao in self.conexoes:                   # Caso não seja uma conexão nova, verifica se já é uma conexão estabelecida
+            if (flags & (FLAGS_ACK | FLAGS_FIN)) == FLAGS_ACK | FLAGS_FIN:      # Se deseja finalizar
+                self.conexoes[id_conexao].recebe_fechar()
             # Passa para a conexão adequada se ela já estiver estabelecida
-            self.conexoes[id_conexao]._rdt_rcv(seq_no, ack_no, flags, payload)
+            else:
+                self.conexoes[id_conexao]._rdt_rcv(seq_no, ack_no, flags, payload)
 
         else:                                                           # Se não for uma conexão nova e não tiver SYN levanta um "erro"
             print('%s:%d -> %s:%d (pacote associado a conexão desconhecida)' %
                   (src_addr, src_port, dst_addr, dst_port))
+            
 
 
 class Conexao:
@@ -60,6 +63,7 @@ class Conexao:
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
         self.seq_no = random.randint(0, 0xffff)            ### Adicionando o valor de seq_no, para indicar o valor atual do número de sequencia
         self.ack_no = ack_no
+        self.esperando_ack_fin = False
 
     def _exemplo_timer(self):
         # Esta função é só um exemplo e pode ser removida
@@ -68,12 +72,19 @@ class Conexao:
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         ## Verificando se o pacote está na sequencia correta
         ## O len do payload tem que ser maior que 0 para não responder ACKs
-        if seq_no == self.ack_no and len(payload) > 0:       # Caso esteja recebendo o pacote certo, ou seja, o seq_no é o mesmo do último ack_no
-            self.ack_no += len(payload) ## Aumentando o valor do ACK para indicar o próximo valor que quer receber
-            
-            self.callback(self, payload)  ## Enviando os dados para a camada de aplicação
+        if seq_no == self.ack_no:       
+            if len(payload) > 0:    # Caso esteja recebendo o pacote certo, ou seja, o seq_no é o mesmo do último ack_no
+                self.ack_no += len(payload) ## Aumentando o valor do ACK para indicar o próximo valor que quer receber
+                
+                self.callback(self, payload)  ## Enviando os dados para a camada de aplicação
 
-            self.send_ack()
+                self.send_ack()
+
+            else:           ## Caso não esteja recebendo pacotes
+                pass
+
+                
+        
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
@@ -89,7 +100,8 @@ class Conexao:
     def send_ack(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) 
-        self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)        ## Não sei pq usei isso
+        self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)       ## Não sei pq usei isso
+        
 
     def registrar_recebedor(self, callback):
         """
@@ -108,18 +120,37 @@ class Conexao:
         src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando dados da conexão
         
         while len(dados) > 0:
-            segmento = dados[:MSS]      # -1 para contar o tamanho do header
+            segmento = dados[:MSS]      
             dados = dados[MSS:]
 
             header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
             self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), self.id_conexao[0])            ## Colocando aqui o endereço do cliente da conexão
             self.seq_no += len (segmento)
+            
+    # Esta função trata o recebimento do FIN, envia o ACK e envia um sinal de fechamento
+    def recebe_fechar(self):
+        self.ack_no += 1               ## Convenciona-se que, quando se recebe FIN, incrementa-se o ack
+        self.callback(self, b'')       ## Enviando mensagem de fechamento para a camada de aplicação
+        self.send_ack()
+        del self.servidor.conexoes[self.id_conexao]
 
-        
 
+
+    # Esta função envia um FIN e receber o ACK
     def fechar(self):
-        """
-        Usado pela camada de aplicação para fechar a conexão
-        """
-        # TODO: implemente aqui o fechamento de conexão
-        pass
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando dados da conexão
+        if self.esperando_ack_fin:      # Caso esteja esperando o ACK do FIN
+            # Deletando no servidor
+            #self.send_ack()
+            del self.servidor.conexoes[self.id_conexao]
+
+        else:                           # Caso esteja enviando o FIN
+            # Enviando ACK de confirmação
+            header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_FIN)
+            self.callback(self, b'')
+            self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), self.id_conexao[0])
+            # Setando estado de espera do ACK
+            self.esperando_ack_fin = True
+            self.seq_no += 1
+            
+        
