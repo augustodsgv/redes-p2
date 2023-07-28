@@ -1,5 +1,5 @@
-import asyncio, struct
-from grader.tcputils import *
+import asyncio, threading, time
+from tcputils import *
 import random
 
 
@@ -59,17 +59,16 @@ class Conexao:
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-        self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
-        #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
+        self.timer = None  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         self.seq_no = random.randint(0, 0xffff)            ### Adicionando o valor de seq_no, para indicar o valor atual do número de sequencia
         self.ack_no = ack_no
         self.esperando_ack_fin = False
-
-    def _exemplo_timer(self):
-        # Esta função é só um exemplo e pode ser removida
-        print('Este é um exemplo de como fazer um timer')
+        self.lastACK = None
+        self.buffer_envio = b''
+        self.tam_ultimo_pacote = None
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+        print('S: recebeu algo')
         ## Verificando se o pacote está na sequencia correta
         ## O len do payload tem que ser maior que 0 para não responder ACKs
         if seq_no == self.ack_no:       
@@ -79,16 +78,20 @@ class Conexao:
                 self.callback(self, payload)  ## Enviando os dados para a camada de aplicação
 
                 self.send_ack()
+                       ## Caso não esteja recebendo pacotes significa que está recebendo ACKs
+            # Verificando se estava esperando receber ACK
+            #print('passou aqui')
 
-            else:           ## Caso não esteja recebendo pacotes
-                pass
+            if len(self.buffer_envio) > 0:
+                print(f'S: Incrementando seq_no de {self.seq_no} para {self.seq_no + len(self.buffer_envio[:MSS])}')
+                self._stop_timer()         # Parando o timer
+                self.seq_no += len(self.buffer_envio[:MSS])            # Incrementando o seq_no
+                self.buffer_envio = self.buffer_envio[MSS:]      # Removendo o primeiro pacote da fila
+                if len(self.buffer_envio) > 0:
+                    self.fazEnvio()
 
-                
-        
-        # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
-        # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
-        # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-    # Os métodos abaixo fazem parte da API
+
+
 
     def hand_shake(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
@@ -110,31 +113,40 @@ class Conexao:
         """
         self.callback = callback
 
-    def enviar(self, dados = ''):
-        """
-        Usado pela camada de aplicação para enviar dados
-        """
-        # TODO: implemente aqui o envio de dados.
-        # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
-        
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando dados da conexão
-        
-        while len(dados) > 0:
-            segmento = dados[:MSS]      
-            dados = dados[MSS:]
+    # Função que coloca os dados em buffer e chama a função que faz o envio de fato
+    def enviar(self, dados):     
+        self.buffer_envio = dados           # Coloca os dados em buffer
+        self.fazEnvio()                     # Envia os primeiros dados do buffer sem precisar esperar o timer
 
-            header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
-            self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), self.id_conexao[0])            ## Colocando aqui o endereço do cliente da conexão
-            self.seq_no += len (segmento)
-            
+    # Função que pega os dados do buffer e envia
+    def fazEnvio(self):
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando informações da conexão
+        segmento = self.buffer_envio[:MSS]                          # Pegando os primeiros MSS bytes do buffer para enviar
+        print(f's : enviando segmento de seq : {self.seq_no}')
+        header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
+        self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), src_addr)
+        self._start_timer()
+
+    '''Funções referentes ao timer'''
+    # Inicia o timer e chama a função de envio
+    def _start_timer(self):
+        self._stop_timer()
+        self.timer = asyncio.get_event_loop().call_later(0.5, self.fazEnvio)
+
+    # Para o timer
+    def _stop_timer(self):
+        if self.timer != None:
+            self.timer.cancel()
+        else:
+            pass
+
+
     # Esta função trata o recebimento do FIN, envia o ACK e envia um sinal de fechamento
     def recebe_fechar(self):
         self.ack_no += 1               ## Convenciona-se que, quando se recebe FIN, incrementa-se o ack
         self.callback(self, b'')       ## Enviando mensagem de fechamento para a camada de aplicação
         self.send_ack()
         del self.servidor.conexoes[self.id_conexao]
-
-
 
     # Esta função envia um FIN e receber o ACK
     def fechar(self):
@@ -148,9 +160,7 @@ class Conexao:
             # Enviando ACK de confirmação
             header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_FIN)
             self.callback(self, b'')
-            self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), self.id_conexao[0])
+            self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)
             # Setando estado de espera do ACK
             self.esperando_ack_fin = True
             self.seq_no += 1
-            
-        
