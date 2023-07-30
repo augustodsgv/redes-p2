@@ -69,7 +69,8 @@ class Conexao:
         self.estimatedRTT = None
         self.devRTT = None
         self.t0 = None
-        self.n_tentativa = 0         # Guarda qual tentativa de envio é essa
+        self.n_tentativa = 0            # Guarda qual tentativa de envio é essa
+        self.window_size = 1            # Guarda o tamanho de janela
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         ## Verificando se o pacote está na sequencia correta
@@ -83,19 +84,8 @@ class Conexao:
                 self.send_ack()
             # Verificando se estava esperando receber ACK
             if len(self.buffer_envio) > 0:
-                if self.n_tentativa == 1:             # Só conta caso seja o primeiro envio
-                    t1 = time.time()                # Pegando o momento de recebimento do ack
-                    self._calc_time_interval(t1 - self.t0)          # Caculando o novo time interval
-                    print(f'Demorou {t1 - self.t0} s para a resposta')
-                    self.t0 = None
-
-                self._stop_timer()         # Parando o timer
-                self.seq_no += len(self.buffer_envio[:MSS])            # Incrementando o seq_no
-                self.buffer_envio = self.buffer_envio[MSS:]      # Removendo o primeiro pacote da fila
-                if len(self.buffer_envio) > 0:
-                    self.fazEnvio()
-                self.n_tentativa = 0                            # Caso tenha recebido o ACK significa que não se precisa mais continuar tentando enviar
-
+                self.recv_ack()
+                
     def hand_shake(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_SYN | FLAGS_ACK) 
@@ -107,7 +97,19 @@ class Conexao:
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) 
         self.servidor.rede.enviar(fix_checksum(header, dst_addr, src_addr), src_addr)       ## Não sei pq usei isso
-        
+    
+    # Função que 
+    def recv_ack(self):
+        if self.n_tentativa == 1:             # Só conta caso seja o primeiro envio
+            self._calc_time_interval()          # Caculando o novo time interval
+
+        self._stop_timer()         # Parando o timer
+        self.seq_no += len(self.buffer_envio[:MSS])            # Incrementando o seq_no
+        self.buffer_envio = self.buffer_envio[MSS:]      # Removendo o primeiro pacote da fila
+        if len(self.buffer_envio) > 0:
+            self.fazEnvio()
+        self.n_tentativa = 0                            # Caso tenha recebido o ACK significa que não se precisa mais continuar tentando enviar
+
 
     def registrar_recebedor(self, callback):
         """
@@ -124,9 +126,10 @@ class Conexao:
     # Função que pega os dados do buffer e envia
     def fazEnvio(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando informações da conexão
-        segmento = self.buffer_envio[:MSS]                          # Pegando os primeiros MSS bytes do buffer para enviar
-        header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
-        self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), src_addr)
+        for i in range(self.window_size):
+            segmento = self.buffer_envio[i * MSS:(1 + i) * MSS]                          # Pegando os primeiros MSS bytes do buffer para enviar
+            header = make_header(dst_port, src_port, self.seq_no + MSS * i, self.ack_no, FLAGS_ACK)
+            self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), src_addr)
 
         self.t0 = time.time()                                       # Iniciando o contador de tempo do cálculo do TimeInterval
         self._start_timer()
@@ -145,7 +148,9 @@ class Conexao:
             self.timer.cancel()
 
     # Calcula o intervalo de tempo
-    def _calc_time_interval(self, sampleRTT):
+    def _calc_time_interval(self):
+        sampleRTT = time.time() - self.t0
+        self.t0 = None
         self.is_reenvio = -1
         if self.estimatedRTT == None:       # Caso seja o primeiro cálculo do TimeInterval
             self.estimatedRTT = sampleRTT
@@ -163,6 +168,7 @@ class Conexao:
         self.time_interval = self.estimatedRTT + 4 * self.devRTT
         print(f'S: Esperando {self.time_interval}s')
 
+    
     # Esta função trata o recebimento do FIN, envia o ACK e envia um sinal de fechamento
     def recebe_fechar(self):
         self.ack_no += 1               ## Convenciona-se que, quando se recebe FIN, incrementa-se o ack
