@@ -1,4 +1,4 @@
-import asyncio, threading, time
+import asyncio, math, time
 from tcputils import *
 import random
 
@@ -62,7 +62,8 @@ class Conexao:
         self.seq_no = random.randint(0, 0xffff)            ### Adicionando o valor de seq_no, para indicar o valor atual do número de sequencia
         self.ack_no = ack_no
         self.esperando_ack_fin = False
-        self.buffer_envio = b''
+        self.unsent_data = b''
+        self.unacked_data = b''
 
         # Atributos relacionados ao timer de envio
         self.time_interval = 0.5        # Inicializando o tempo como 0.5 arbitrariamente
@@ -85,7 +86,7 @@ class Conexao:
 
                 self.send_ack()
             # Verificando se estava esperando receber ACK
-            if len(self.buffer_envio) > 0:
+            if len(self.unacked_data) > 0:
                 self.recv_ack(ack_no)
                 
     def hand_shake(self):
@@ -103,26 +104,35 @@ class Conexao:
     # Função que trata o recebimento de ACKs
     def recv_ack(self, ack_no):
         # Cálculo do time interval        
-        if self.n_tentativa == 1:             # Só conta caso seja o primeiro envio
+        if self.t0 != None:             # Só conta caso seja o primeiro envio
             self._calc_time_interval()          # Calculando o novo time interval
-        self.n_tentativa = 0                            # Caso tenha recebido o ACK significa que não se precisa mais continuar tentando enviar
 
         self._stop_timer()         # Parando o timer
-        #self.seq_no += len(self.buffer_envio[:MSS])            # Incrementando o seq_no
-        #self.buffer_envio = self.buffer_envio[MSS:]      # Removendo o primeiro pacote da fila
+        #self.seq_no += len(self.unsent_data[:MSS])            # Incrementando o seq_no
+        #self.unsent_data = self.unsent_data[MSS:]      # Removendo o primeiro pacote da fila
 
-        if ack_no == self.next_seq_no:                     # Caso tenha recebido dos os ACKs pendentes
-            self.buffer_envio = self.buffer_envio[self.next_seq_no - self.seq_no:]      # Removendo o primeiro pacote da fila
-            #self.buffer_envio = b''
+        if ack_no == self.next_seq_no:                     # Recebeu ACK de toda a janela
+            self.unacked_data = b''
+            #self.unsent_data = self.unsent_data[self.next_seq_no - self.seq_no:]      # Removendo o primeiro pacote da fila
             # Resolvendo o tamanho das janelas
             self.seq_no = self.next_seq_no
-            if self.increase_window_size:
+
+            if self.increase_window_size and self.n_tentativa == 0:
                 self.window_size += 1               # Aumentando o tamanho da window_size em 1
                 print(f'Aumentando window_size para {self.window_size}')
                 self.increase_window_size = False   # Retira a flag de aumentar a window_size
-
-            if len(self.buffer_envio) > 0:      # Caso ainda haja segmentos a enviar
+            
+            if len(self.unsent_data) > 0:      # Caso ainda haja segmentos a enviar
                 self.fazEnvio()
+            self.n_tentativa = 0
+        elif self.n_tentativa > 0:                                           # Recebeu ACK de somente um pacote
+            self.unacked_data = self.unacked_data[MSS:]     # Tirando pacote da fila dos que não receberam ack
+            self.seq_no += MSS
+            if len(self.unacked_data) > 0:                  # Se ainda houver pacotes não respondidos
+                self.reenvia()      
+            else:
+                self.n_tentativa = 0                            # Caso tenha recebido o ACK significa que não se precisa mais continuar tentando enviar
+
 
 
     def registrar_recebedor(self, callback):
@@ -134,32 +144,40 @@ class Conexao:
 
     # Função que coloca os dados em buffer e chama a função que faz o envio de fato
     def enviar(self, dados):     
-        self.buffer_envio += dados           # Coloca os dados em buffer
+        self.unsent_data += dados           # Coloca os dados em buffer
         self.fazEnvio()                     # Envia os primeiros dados do buffer sem precisar esperar o timer
 
     # Função que pega os dados do buffer e envia
     def fazEnvio(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando informações da conexão
-        #self.n_acks = len(self.buffer_envio[:self.window_size * MSS]) / MSS  # Registra quantos ACKS precisa receber antes de enviar novamente
-        self.increase_window_size = len(self.buffer_envio[:self.window_size * MSS]) / MSS >= self.window_size     # Verifica se a janela precisa ser aumentada
-
+        self.increase_window_size = len(self.unsent_data[:self.window_size * MSS]) / MSS >= self.window_size     # Verifica se a janela precisa ser aumentada
+        self.next_seq_no = self.seq_no
         for i in range(self.window_size):
-            segmento = self.buffer_envio[i * MSS:(1 + i) * MSS]                          # Pegando os primeiros MSS bytes do buffer para enviar
+            segmento = self.unsent_data[:MSS]                          # Pegando os primeiros MSS bytes do buffer para enviar
             if len(segmento) > 0:
-                header = make_header(dst_port, src_port, self.seq_no + MSS * i, self.ack_no, FLAGS_ACK)
-                print('enviando')
+                self.unsent_data = self.unsent_data[MSS:]                                      # Removendo da fila de não enviados
+                self.unacked_data += segmento
+                header = make_header(dst_port, src_port, self.next_seq_no, self.ack_no, FLAGS_ACK)
                 self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), src_addr)
-        self.next_seq_no = self.seq_no + len(self.buffer_envio[:self.window_size * MSS])
+                self.next_seq_no += len(segmento)
+
+
         self.t0 = time.time()                                       # Iniciando o contador de tempo do cálculo do TimeInterval
         self._start_timer()
 
+    def reenvia(self):
+        self.t0 = None
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao    # Pegando informações da conexão
+        segmento = self.unacked_data[:MSS]
+        header = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK)
+        self.servidor.rede.enviar(fix_checksum(header + segmento, dst_addr, src_addr), src_addr)
+        self._start_timer()
 
     '''Funções referentes ao timer'''
     # Inicia o timer e chama a função de envio
     def _start_timer(self):
         self._stop_timer()
         self.timer = asyncio.get_event_loop().call_later(self.time_interval, self._timer_timeout)
-        self.n_tentativa += 1
 
     # Para o timer
     def _stop_timer(self):
@@ -167,12 +185,14 @@ class Conexao:
             self.timer.cancel()
 
     def _timer_timeout(self):
+        self.n_tentativa += 1
         # Diminui o tamanho da janela de envio
-        self.window_size = int((self.window_size + 1) /2)
+        self.window_size = math.ceil(self.window_size /2)
+        self.window_size = self.window_size if self.window_size != 0 else 1
         print(f'diminundo para {self.window_size}')
         
         # Envia novamente
-        self.fazEnvio()
+        self.reenvia()
 
     # Calcula o intervalo de tempo
     def _calc_time_interval(self):
@@ -193,6 +213,8 @@ class Conexao:
 
         # Calulando o Time Interval
         self.time_interval = self.estimatedRTT + 4 * self.devRTT
+        print(f'ajustando time interval para {self.time_interval}s')
+
 
     
     # Esta função trata o recebimento do FIN, envia o ACK e envia um sinal de fechamento
