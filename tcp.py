@@ -1,3 +1,6 @@
+# Arquivo : tpc.py
+# Descrição : Implementação de um protótipo de TCP para a disciplina de Redes de Computadores da UFSCar. 
+
 import asyncio, math, time
 from tcputils import *
 import random
